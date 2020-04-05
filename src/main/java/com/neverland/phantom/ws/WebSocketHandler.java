@@ -11,7 +11,9 @@ import org.springframework.web.socket.handler.BinaryWebSocketHandler;
 import java.io.*;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.net.InetAddress;
 import java.net.Socket;
+import java.net.SocketAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -71,10 +73,37 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
      */
     void messageHandlerForType1(ByteBuffer buffer, WebSocketSession session) {
         try {
-            handleClientCommand(buffer, session);
+            if (buffer.get() == 0x43) {//HTTP Proxy
+                handleHTTPProxy(buffer, session);
+            } else {
+                handleClientCommand(buffer, session);
+            }
         } catch (IOException e) {
             e.printStackTrace();
         }
+    }
+
+    // HTTP代理连接目标地址
+    private void handleHTTPProxy(ByteBuffer buffer, WebSocketSession session) throws IOException {
+        byte[] dataBuff = new byte[buffer.limit()-1];
+        buffer.get(dataBuff);
+        String string = new String(dataBuff);
+        String header = string.split("\r\n")[0];
+        logger.debug(header);
+        String[] host = header.split(" ")[1].split(":");
+        Socket socket = (Socket) session.getAttributes().get("socket");
+        if (socket == null) {
+            try {
+                socket = new Socket(host[0], Integer.parseInt(host[1]));
+            } catch (UnknownHostException e) {
+                e.printStackTrace();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        BinaryMessage msg = new BinaryMessage("HTTP/1.1 200 Connection Established\\r\\n\\r\\n".getBytes());
+        session.sendMessage(msg);
     }
 
     // 认证通过，开始处理客户端发送过来的指令
