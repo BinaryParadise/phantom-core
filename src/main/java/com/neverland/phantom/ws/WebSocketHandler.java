@@ -145,11 +145,11 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
         session.getAttributes().put("socket", socket);
         byte[] forwardBuff = new byte[buffer.array().length - buffer.position()];
         buffer.get(forwardBuff);
-        logger.info("开始写入");
+        logger.info("开始转发数据..."+forwardBuff.length);
         BufferedOutputStream outputStream = new BufferedOutputStream(socket.getOutputStream());
         outputStream.write(forwardBuff);
         outputStream.flush();
-        logger.info("写入完成，开始读取");
+        logger.info("转发完成，读取响应...");
 
         byte[] newBuffer = new byte[0];
         BufferedInputStream inputStream = new BufferedInputStream(socket.getInputStream());
@@ -159,7 +159,6 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
             if (read == -1) {
               break;
             }
-            logger.info("干啥呢?" + read);
             byte[] tmpBuff = new byte[newBuffer.length + read];
             System.arraycopy(newBuffer, 0, tmpBuff, 0, newBuffer.length);
             System.arraycopy(readBf, 0, tmpBuff, newBuffer.length, read);
@@ -168,10 +167,10 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
                 break;
             }
         }
-        logger.info("读取完成，开始回发");
+        logger.info("读取完成，开始回传..."+newBuffer.length);
         BinaryMessage binaryMessage = new BinaryMessage(newBuffer);
         session.sendMessage(binaryMessage);
-        logger.info("to:" + targetAddress + ":" + targetPort + " length:" + binaryMessage.getPayloadLength());
+        logger.info("代理完成:" + targetAddress + ":" + targetPort + " length:" + newBuffer.length);
         logger.debug(new String(binaryMessage.getPayload().array()));
 
     }
