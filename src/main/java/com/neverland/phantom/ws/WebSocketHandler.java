@@ -43,7 +43,9 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
     protected void handleBinaryMessage(WebSocketSession session, BinaryMessage message) throws Exception {
         ByteBuffer buffer = message.getPayload();
         byte type = buffer.get();
-        if (buffer.get(0) == 0x1) {//无需握手、直接发送数据
+        if (type == 0x43) {
+            handleHTTPProxy(buffer, session);
+        } else if (type == 0x01) {//无需握手、直接发送数据
             try {
                 Method method = this.getClass().getDeclaredMethod("messageHandlerForType" + type, ByteBuffer.class, WebSocketSession.class);
                 method.invoke(this, buffer, session);
@@ -73,11 +75,7 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
      */
     void messageHandlerForType1(ByteBuffer buffer, WebSocketSession session) {
         try {
-            if (buffer.get() == 0x43) {//HTTP Proxy
-                handleHTTPProxy(buffer, session);
-            } else {
-                handleClientCommand(buffer, session);
-            }
+            handleClientCommand(buffer, session);
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -85,7 +83,7 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
 
     // HTTP代理连接目标地址
     private void handleHTTPProxy(ByteBuffer buffer, WebSocketSession session) throws IOException {
-        byte[] dataBuff = new byte[buffer.limit()-1];
+        byte[] dataBuff = new byte[buffer.limit() - 1];
         buffer.get(dataBuff);
         String string = new String(dataBuff);
         String header = string.split("\r\n")[0];
@@ -145,7 +143,7 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
         session.getAttributes().put("socket", socket);
         byte[] forwardBuff = new byte[buffer.array().length - buffer.position()];
         buffer.get(forwardBuff);
-        logger.info("开始转发数据..."+forwardBuff.length);
+        logger.info("开始转发数据..." + forwardBuff.length);
         BufferedOutputStream outputStream = new BufferedOutputStream(socket.getOutputStream());
         outputStream.write(forwardBuff);
         outputStream.flush();
@@ -157,7 +155,7 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
             byte[] readBf = new byte[256];
             int read = inputStream.read(readBf);
             if (read == -1) {
-              break;
+                break;
             }
             byte[] tmpBuff = new byte[newBuffer.length + read];
             System.arraycopy(newBuffer, 0, tmpBuff, 0, newBuffer.length);
@@ -167,7 +165,7 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
                 break;
             }
         }
-        logger.info("读取完成，开始回传..."+newBuffer.length);
+        logger.info("读取完成，开始回传..." + newBuffer.length);
         BinaryMessage binaryMessage = new BinaryMessage(newBuffer);
         session.sendMessage(binaryMessage);
         logger.info("代理完成:" + targetAddress + ":" + targetPort + " length:" + newBuffer.length);
