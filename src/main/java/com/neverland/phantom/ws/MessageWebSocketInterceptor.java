@@ -14,7 +14,8 @@ import static org.springframework.web.servlet.HandlerMapping.URI_TEMPLATE_VARIAB
 public class MessageWebSocketInterceptor implements HandshakeInterceptor {
     @Override
     public boolean beforeHandshake(ServerHttpRequest serverHttpRequest, ServerHttpResponse serverHttpResponse, WebSocketHandler webSocketHandler, Map<String, Object> map) throws Exception {
-        if (!serverHttpRequest.getHeaders().get("sec-websocket-protocol").contains("phantom-core")) {
+        String swpKey = "sec-websocket-protocol";
+        if (!serverHttpRequest.getHeaders().containsKey(swpKey) || !serverHttpRequest.getHeaders().get(swpKey).contains("phantom-core")) {
             serverHttpResponse.setStatusCode(HttpStatus.UNSUPPORTED_MEDIA_TYPE);
             return false;
         }
@@ -22,7 +23,9 @@ public class MessageWebSocketInterceptor implements HandshakeInterceptor {
         if (serverHttpRequest instanceof ServletServerHttpRequest) {
             ServletServerHttpRequest request = (ServletServerHttpRequest) serverHttpRequest;
             Map uriAttrs = (Map) request.getServletRequest().getAttribute(URI_TEMPLATE_VARIABLES_ATTRIBUTE);
-            map.putAll(uriAttrs);
+            if (uriAttrs != null) {
+                map.putAll(uriAttrs);
+            }
         }
         return true;
     }
