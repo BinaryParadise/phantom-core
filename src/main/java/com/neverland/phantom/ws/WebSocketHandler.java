@@ -2,24 +2,18 @@ package com.neverland.phantom.ws;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.web.socket.BinaryMessage;
-import org.springframework.web.socket.CloseStatus;
-import org.springframework.web.socket.PongMessage;
-import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.*;
 import org.springframework.web.socket.handler.BinaryWebSocketHandler;
 
-import java.io.*;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.net.InetAddress;
 import java.net.Socket;
-import java.net.SocketAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
-import java.util.List;
 
 public class WebSocketHandler extends BinaryWebSocketHandler {
     Logger logger = LoggerFactory.getLogger(WebSocketHandler.class);
@@ -36,6 +30,7 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
+        session.getAttributes().remove("socket");
         logger.info(session.getRemoteAddress().toString() + " closed.(" + status + ")");
     }
 
@@ -43,25 +38,20 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
     protected void handleBinaryMessage(WebSocketSession session, BinaryMessage message) throws Exception {
         ByteBuffer buffer = message.getPayload();
         byte type = buffer.get();
-        if (type == 0x43) {
-            handleHTTPProxy(buffer, session);
-        } else if (type == 0x01) {//无需握手、直接发送数据
-            try {
-                Method method = this.getClass().getDeclaredMethod("messageHandlerForType" + type, ByteBuffer.class, WebSocketSession.class);
-                method.invoke(this, buffer, session);
-            } catch (NoSuchMethodException e) {
-                logger.error("can't transform data: " + type, e);
-            } catch (IllegalAccessException e) {
-                logger.error(e.getLocalizedMessage(), e.getCause());
-            } catch (InvocationTargetException e) {
-                logger.error(e.getLocalizedMessage(), e.getCause());
-            }
+        try {
+            Method method = this.getClass().getDeclaredMethod("messageHandlerForType" + type, ByteBuffer.class, WebSocketSession.class);
+            method.invoke(this, buffer, session);
+        } catch (NoSuchMethodException e) {
+            logger.error("can't transform data: " + type, e);
+        } catch (IllegalAccessException e) {
+            logger.error(e.getLocalizedMessage(), e.getCause());
+        } catch (InvocationTargetException e) {
+            logger.error(e.getLocalizedMessage(), e.getCause());
         }
     }
 
     @Override
     protected void handlePongMessage(WebSocketSession session, PongMessage message) throws Exception {
-        logger.info("【" + (String) session.getAttributes().get("deviceid") + "】发来一个Pong");
         super.handlePongMessage(session, message);
     }
 
@@ -71,9 +61,36 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
     }
 
     /**
-     * 代理请求
+     * 和目标服务器建立连接
      */
-    void messageHandlerForType1(ByteBuffer buffer, WebSocketSession session) {
+    void messageHandlerForType1(ByteBuffer buffer, WebSocketSession session) throws IOException {
+        buffer.position(1);
+        int addressLength = buffer.get();
+        byte[] dst1 = new byte[addressLength];
+        buffer.get(dst1);
+        String targetAddress = new String(dst1);
+
+        int targetPort = buffer.getShort();
+
+        Socket socket = (Socket) session.getAttributes().get("socket");
+        if (socket == null) {
+            try {
+                socket = new Socket(targetAddress, targetPort);
+                session.getAttributes().put("socket", socket);
+                logger.info("请求连接至 "+socket.getRemoteSocketAddress().toString());
+                PingMessage pingMessage = new PingMessage(ByteBuffer.wrap(new byte[]{0x01, 0x00}));
+                session.sendMessage(pingMessage);
+            } catch (UnknownHostException e) {
+                e.printStackTrace();
+                session.close(CloseStatus.PROTOCOL_ERROR);
+            } catch (IOException e) {
+                e.printStackTrace();
+                session.close(CloseStatus.PROTOCOL_ERROR);
+            }
+        }
+    }
+
+    void messageHandlerForType2(ByteBuffer buffer, WebSocketSession session) {
         try {
             handleClientCommand(buffer, session);
         } catch (IOException e) {
@@ -106,71 +123,38 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
 
     // 认证通过，开始处理客户端发送过来的指令
     private void handleClientCommand(ByteBuffer buffer, WebSocketSession session) throws IOException {
-        buffer.position(4);
-        ADDRESS_TYPE addressType = ADDRESS_TYPE.convertToAddressType(buffer.get());
-
-        String targetAddress = "";
-        switch (addressType) {
-            case DOMAIN:
-                // 如果是域名的话第一个字节表示域名的长度为n，紧接着n个字节表示域名
-                int domainLength = buffer.get();
-                byte[] dst1 = new byte[domainLength];
-                buffer.get(dst1);
-                targetAddress = new String(dst1);
-                break;
-            case IPV4:
-                // 如果是ipv4的话使用固定的4个字节表示地址
-                byte[] dst2 = new byte[4];
-                buffer.get(dst2);
-                targetAddress = ipAddressBytesToString(dst2);
-                break;
-            case IPV6:
-                throw new RuntimeException("not support ipv6.");
-        }
-
-        int targetPort = buffer.getShort();
-
+        buffer.position(1);
         Socket socket = (Socket) session.getAttributes().get("socket");
         if (socket == null) {
-            try {
-                socket = new Socket(targetAddress, targetPort);
-            } catch (UnknownHostException e) {
-                e.printStackTrace();
-            } catch (IOException e) {
-                e.printStackTrace();
+            PingMessage pingMessage = new PingMessage(ByteBuffer.wrap(new byte[]{0x02}));
+            session.sendMessage(pingMessage);
+        } else {
+            byte[] forwardBuff = new byte[buffer.array().length - buffer.position()];
+            buffer.get(forwardBuff);
+            logger.info("开始转发数据..." + forwardBuff.length);
+            BufferedOutputStream outputStream = new BufferedOutputStream(socket.getOutputStream());
+            outputStream.write(forwardBuff);
+            outputStream.flush();
+            logger.info("转发完成，获取响应...");
+            BufferedInputStream inputStream = new BufferedInputStream(socket.getInputStream());
+            int receive = 0;
+            while (true) {
+                byte[] readBuffer = new byte[1024];
+                int read = inputStream.read(readBuffer);
+                if (read > 0) {
+                    receive += read;
+                    logger.info("数据回传中..." + read);
+                    BinaryMessage binaryMessage = new BinaryMessage(ByteBuffer.wrap(readBuffer, 0, read));
+                    session.sendMessage(binaryMessage);
+                    if (read < readBuffer.length) {//不能使用-1，这里是从网络读取会等待超时才返回
+                        break;
+                    }
+                } else {
+                    break;
+                }
             }
+            logger.info("本次请求转发完成..." + receive);
         }
-        session.getAttributes().put("socket", socket);
-        byte[] forwardBuff = new byte[buffer.array().length - buffer.position()];
-        buffer.get(forwardBuff);
-        logger.info("开始转发数据..." + forwardBuff.length);
-        BufferedOutputStream outputStream = new BufferedOutputStream(socket.getOutputStream());
-        outputStream.write(forwardBuff);
-        outputStream.flush();
-        logger.info("转发完成，读取响应...");
-
-        byte[] newBuffer = new byte[0];
-        BufferedInputStream inputStream = new BufferedInputStream(socket.getInputStream());
-        while (true) {
-            byte[] readBf = new byte[256];
-            int read = inputStream.read(readBf);
-            if (read == -1) {
-                break;
-            }
-            byte[] tmpBuff = new byte[newBuffer.length + read];
-            System.arraycopy(newBuffer, 0, tmpBuff, 0, newBuffer.length);
-            System.arraycopy(readBf, 0, tmpBuff, newBuffer.length, read);
-            newBuffer = tmpBuff;
-            if (read < 256) {//不能使用-1，这里是从网络读取会等待超时才返回
-                break;
-            }
-        }
-        logger.info("读取完成，开始回传..." + newBuffer.length);
-        BinaryMessage binaryMessage = new BinaryMessage(newBuffer);
-        session.sendMessage(binaryMessage);
-        logger.info("代理完成:" + targetAddress + ":" + targetPort + " length:" + newBuffer.length);
-        logger.debug(new String(binaryMessage.getPayload().array()));
-
     }
 
     // convert ip address from 4 byte to string

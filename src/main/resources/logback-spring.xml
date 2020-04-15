@@ -48,7 +48,7 @@
     </appender>
 
     <!-- 日志输出级别 -->
-    <root level="info">
+    <root level="debug">
         <appender-ref ref="application"/>
         <appender-ref ref="STDOUT"/>
         <appender-ref ref="forward"></appender-ref>
