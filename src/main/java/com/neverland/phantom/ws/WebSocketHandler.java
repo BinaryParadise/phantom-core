@@ -7,21 +7,14 @@ import org.springframework.web.socket.handler.BinaryWebSocketHandler;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.net.Socket;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
-import java.util.HashMap;
 
 public class WebSocketHandler extends BinaryWebSocketHandler {
     Logger logger = LoggerFactory.getLogger(WebSocketHandler.class);
-
-    /**
-     * 客户端会话合集
-     */
-    static HashMap<String, WebSocketSession> clientSessions = new HashMap<>();
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
@@ -30,23 +23,36 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
-        session.getAttributes().remove("socket");
+        Socket socket = (Socket) session.getAttributes().get("socket");
+        if (socket != null) {
+            socket.close();
+            session.getAttributes().remove("socket");
+        }
         logger.info(session.getRemoteAddress().toString() + " closed.(" + status + ")");
     }
 
     @Override
     protected void handleBinaryMessage(WebSocketSession session, BinaryMessage message) throws Exception {
         ByteBuffer buffer = message.getPayload();
-        byte type = buffer.get();
-        try {
-            Method method = this.getClass().getDeclaredMethod("messageHandlerForType" + type, ByteBuffer.class, WebSocketSession.class);
-            method.invoke(this, buffer, session);
-        } catch (NoSuchMethodException e) {
-            logger.error("can't transform data: " + type, e);
-        } catch (IllegalAccessException e) {
-            logger.error(e.getLocalizedMessage(), e.getCause());
-        } catch (InvocationTargetException e) {
-            logger.error(e.getLocalizedMessage(), e.getCause());
+        COMMAND type = COMMAND.convertToCmd(buffer.get());
+        if (type == COMMAND.Authorization) {
+            messageHandlerAuthorization(buffer, session);
+        } else {
+            if (session.getAttributes().containsKey("id")) {
+                switch (type) {
+                    case Connect:
+                        messageHandlerConnect(buffer, session);
+                        break;
+                    case Forward:
+                        messageHandlerForward(buffer, session);
+                        break;
+                    default:
+                        session.close(CloseStatus.PROTOCOL_ERROR);
+                        break;
+                }
+            } else {
+                session.close(CloseStatus.NOT_ACCEPTABLE.withReason("unauthorized"));
+            }
         }
     }
 
@@ -61,25 +67,43 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
     }
 
     /**
+     * 访问授权
+     */
+    void messageHandlerAuthorization(ByteBuffer buffer, WebSocketSession session) throws IOException {
+        buffer.position(1);
+        int idlength = buffer.get();
+        byte[] dst1 = new byte[idlength];
+        buffer.get(dst1);
+        //授权ID
+        String id = new String(dst1);
+        //TODO:读取配置文件
+        if (id.equalsIgnoreCase("3b8e10b8-8c7b-11eb-8dcd-0242ac130003")) {
+            session.getAttributes().put("id", id);
+            session.sendMessage(createMessage(COMMAND.Authorization, new byte[]{0x01}, 1));
+        } else {
+            session.close(CloseStatus.BAD_DATA.withReason("Data format error"));
+        }
+    }
+
+    /**
      * 和目标服务器建立连接
      */
-    void messageHandlerForType1(ByteBuffer buffer, WebSocketSession session) throws IOException {
+    void messageHandlerConnect(ByteBuffer buffer, WebSocketSession session) throws IOException {
         buffer.position(1);
         int addressLength = buffer.get();
         byte[] dst1 = new byte[addressLength];
         buffer.get(dst1);
         String targetAddress = new String(dst1);
 
-        int targetPort = buffer.getShort();
+        int targetPort = buffer.getShort() & 0xFFFF;
 
         Socket socket = (Socket) session.getAttributes().get("socket");
         if (socket == null) {
             try {
                 socket = new Socket(targetAddress, targetPort);
                 session.getAttributes().put("socket", socket);
-                logger.info("请求连接至 "+socket.getRemoteSocketAddress().toString());
-                PingMessage pingMessage = new PingMessage(ByteBuffer.wrap(new byte[]{0x01, 0x00}));
-                session.sendMessage(pingMessage);
+                logger.info("请求连接至 " + socket.getRemoteSocketAddress().toString());
+                session.sendMessage(createMessage(COMMAND.Connect, new byte[]{0x00}));
             } catch (UnknownHostException e) {
                 e.printStackTrace();
                 session.close(CloseStatus.PROTOCOL_ERROR);
@@ -90,7 +114,8 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
         }
     }
 
-    void messageHandlerForType2(ByteBuffer buffer, WebSocketSession session) {
+    // 转发请求
+    void messageHandlerForward(ByteBuffer buffer, WebSocketSession session) {
         try {
             handleClientCommand(buffer, session);
         } catch (IOException e) {
@@ -129,23 +154,26 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
             PingMessage pingMessage = new PingMessage(ByteBuffer.wrap(new byte[]{0x02}));
             session.sendMessage(pingMessage);
         } else {
-            byte[] forwardBuff = new byte[buffer.array().length - buffer.position()];
-            buffer.get(forwardBuff);
-            logger.info("开始转发数据..." + forwardBuff.length);
-            BufferedOutputStream outputStream = new BufferedOutputStream(socket.getOutputStream());
-            outputStream.write(forwardBuff);
-            outputStream.flush();
-            logger.info("转发完成，获取响应...");
+            try {
+                byte[] forwardBuff = new byte[buffer.array().length - buffer.position()];
+                buffer.get(forwardBuff);
+                logger.info("转发请求[数据长度=" + forwardBuff.length + "]");
+                BufferedOutputStream outputStream = new BufferedOutputStream(socket.getOutputStream());
+                outputStream.write(forwardBuff);
+                outputStream.flush();
+                logger.info("转发完成，获取响应...");
+            } catch (IOException exception) {
+                logger.error(exception.getLocalizedMessage(), exception.getCause());
+            }
             BufferedInputStream inputStream = new BufferedInputStream(socket.getInputStream());
             int receive = 0;
             while (true) {
-                byte[] readBuffer = new byte[1024];
+                byte[] readBuffer = new byte[4096];
                 int read = inputStream.read(readBuffer);
                 if (read > 0) {
                     receive += read;
                     logger.info("数据回传中..." + read);
-                    BinaryMessage binaryMessage = new BinaryMessage(ByteBuffer.wrap(readBuffer, 0, read));
-                    session.sendMessage(binaryMessage);
+                    session.sendMessage(createMessage(COMMAND.Transport, readBuffer, read));
                     if (read < readBuffer.length) {//不能使用-1，这里是从网络读取会等待超时才返回
                         break;
                     }
@@ -157,6 +185,17 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
         }
     }
 
+    BinaryMessage createMessage(COMMAND cmd, byte[] buffer) {
+        return createMessage(cmd, buffer, buffer.length);
+    }
+
+    BinaryMessage createMessage(COMMAND cmd, byte[] buffer, int length) {
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        outputStream.write(cmd.value);
+        outputStream.write(buffer, 0, length);
+        return new BinaryMessage(outputStream.toByteArray());
+    }
+
     // convert ip address from 4 byte to string
     private String ipAddressBytesToString(byte[] ipAddressBytes) {
         // first convert to int avoid negative
@@ -165,9 +204,11 @@ public class WebSocketHandler extends BinaryWebSocketHandler {
 
     // 客户端命令
     public static enum COMMAND {
-        CONNECT((byte) 0X01, "CONNECT"),
-        BIND((byte) 0X02, "BIND"),
-        UDP_ASSOCIATE((byte) 0X03, "UDP ASSOCIATE");
+        Authorization((byte) 0X01, "Authorization"),
+        Connect((byte) 0X02, "Connect"),
+        Forward((byte) 0x03, "Forward Request"),
+        Transport((byte) 0x04, "Transport Data"),
+        Unsupport((byte) 0x00, "Unsupport");
 
         byte value;
         String description;

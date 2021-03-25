@@ -21,7 +21,6 @@ public class TomcatConfiguration {
     @Bean
     public ServletWebServerFactory servletContainer() {
         TomcatServletWebServerFactory tomcat = new TomcatServletWebServerFactory();
-
         tomcat.addAdditionalTomcatConnectors(createSslConnector());
         return tomcat;
     }
